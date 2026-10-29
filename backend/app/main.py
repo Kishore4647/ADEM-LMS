@@ -39,7 +39,10 @@ app = FastAPI(title=settings.app_name, version="0.1.0", lifespan=lifespan)
 app.add_middleware(
     SessionMiddleware,
     secret_key=auth.build_session_secret(),
-    same_site="lax",
+    # The deployed frontend and API use different HTTPS origins (Vercel and
+    # Render). Production cookies must therefore be allowed on cross-site API
+    # requests; local development remains same-site friendly.
+    same_site="none" if settings.environment == "production" else "lax",
     https_only=settings.environment == "production",
     max_age=28800,
 )
