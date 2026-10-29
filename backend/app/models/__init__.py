@@ -6,6 +6,7 @@ from app.models.academic import (
     CurriculumNode,
     MarkRecord,
     School,
+    StudentEnrollment,
     StudentProfile,
     UserSchoolAssignment,
 )
@@ -18,6 +19,7 @@ __all__ = [
     "CurriculumNode",
     "MarkRecord",
     "School",
+    "StudentEnrollment",
     "StudentProfile",
     "User",
     "UserRole",

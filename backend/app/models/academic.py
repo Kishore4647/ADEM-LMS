@@ -88,6 +88,9 @@ class CurriculumNode(Base):
 
 class StudentProfile(Base):
     __tablename__ = "student_profiles"
+    __table_args__ = (
+        UniqueConstraint("school_id", "admission_number", name="uq_school_admission"),
+    )
 
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(
@@ -98,7 +101,34 @@ class StudentProfile(Base):
         ForeignKey("curriculum_nodes.id"), index=True
     )
     admission_number: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    section: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    academic_year: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    status: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    retain_next_year: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
     parent_phone: Mapped[str | None] = mapped_column(String(30), nullable=True)
+
+
+class StudentEnrollment(Base):
+    """Immutable academic-year placement history for promotion and retention."""
+
+    __tablename__ = "student_enrollments"
+    __table_args__ = (
+        UniqueConstraint("student_id", "academic_year", name="uq_student_academic_year"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    student_id: Mapped[int] = mapped_column(
+        ForeignKey("student_profiles.id", ondelete="CASCADE"), index=True
+    )
+    academic_year: Mapped[str] = mapped_column(String(20), index=True)
+    class_node_id: Mapped[int] = mapped_column(
+        ForeignKey("curriculum_nodes.id"), index=True
+    )
+    section: Mapped[str] = mapped_column(String(40))
+    outcome: Mapped[str] = mapped_column(String(20), default="active", nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now()
+    )
 
 
 class AssessmentComponent(str, enum.Enum):

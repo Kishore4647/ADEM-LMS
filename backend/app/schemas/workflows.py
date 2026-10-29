@@ -1,7 +1,7 @@
 from datetime import date
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, model_validator
 
 
 class Payload(BaseModel):
@@ -9,10 +9,57 @@ class Payload(BaseModel):
 
 
 class StudentInput(Payload):
-    user_id: int
+    user_id: int | None = None
     school_id: int
     class_node_id: int
-    admission_number: str | None = None
+    admission_number: str = Field(min_length=1, max_length=80)
+    section: str = Field(min_length=1, max_length=40)
+    academic_year: str = Field(pattern=r"^\d{4}-\d{4}$")
+    full_name: str | None = Field(default=None, min_length=1, max_length=255)
+    email: EmailStr | None = None
+
+    @model_validator(mode="after")
+    def account_or_identity(self):
+        if self.user_id is None and (not self.full_name or not self.email):
+            raise ValueError("Enter the student's name and Google email.")
+        start, end = map(int, self.academic_year.split("-"))
+        if end != start + 1:
+            raise ValueError("Academic year must contain consecutive years.")
+        return self
+
+
+class StudentUpdate(Payload):
+    full_name: str = Field(min_length=1, max_length=255)
+    email: EmailStr
+    admission_number: str = Field(min_length=1, max_length=80)
+    section: str = Field(min_length=1, max_length=40)
+    academic_year: str = Field(pattern=r"^\d{4}-\d{4}$")
+
+    @model_validator(mode="after")
+    def valid_academic_year(self):
+        start, end = map(int, self.academic_year.split("-"))
+        if end != start + 1:
+            raise ValueError("Academic year must contain consecutive years.")
+        return self
+
+
+class RetentionInput(Payload):
+    retain: bool
+
+
+class YearCloseInput(Payload):
+    current_academic_year: str = Field(pattern=r"^\d{4}-\d{4}$")
+    next_academic_year: str = Field(pattern=r"^\d{4}-\d{4}$")
+
+    @model_validator(mode="after")
+    def consecutive_years(self):
+        current_start, current_end = map(int, self.current_academic_year.split("-"))
+        next_start, next_end = map(int, self.next_academic_year.split("-"))
+        if current_end != current_start + 1 or next_end != next_start + 1:
+            raise ValueError("Academic years must contain consecutive years.")
+        if next_start != current_end:
+            raise ValueError("The next academic year must follow the current year.")
+        return self
 
 
 class TeachingInput(Payload):

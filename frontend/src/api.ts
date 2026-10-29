@@ -60,7 +60,20 @@ export type Student = {
   school_id: number;
   class_node_id: number;
   name: string;
+  email: string;
   admission_number: string;
+  section: string;
+  academic_year: string;
+  status: string;
+  retain_next_year: boolean;
+};
+export type Enrollment = {
+  id: number;
+  student_id: number;
+  academic_year: string;
+  class_node_id: number;
+  section: string;
+  outcome: string;
 };
 export type Teaching = {
   id: number;
@@ -165,6 +178,7 @@ export type Data = {
   boards: Board[];
   nodes: Node[];
   students: Student[];
+  enrollments: Enrollment[];
   teaching: Teaching[];
   assets: Asset[];
   sessions: Session[];

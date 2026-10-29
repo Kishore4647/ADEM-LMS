@@ -1,3 +1,4 @@
+import csv
 import io
 import re
 from datetime import datetime, timezone
@@ -20,6 +21,7 @@ from app.models import (
     CurriculumNode,
     MarkRecord,
     School,
+    StudentEnrollment,
     StudentProfile,
     User,
     UserRole,
@@ -47,13 +49,16 @@ from app.schemas.workflows import (
     PublicationInput,
     QuestionSetInput,
     ReadinessInput,
+    RetentionInput,
     ReviewInput,
     ScoreCorrection,
     SessionInput,
     StatusInput,
     StudentInput,
+    StudentUpdate,
     TeachingInput,
     UserUpdate,
+    YearCloseInput,
 )
 from app.services.access import (
     audit,
@@ -291,12 +296,15 @@ def workspace_data(
     profiles = []
     for s in students:
         item = record_dict(s)
-        item["name"] = (
-            db.get(User, s.user_id).full_name or db.get(User, s.user_id).email
-        )
+        account = db.get(User, s.user_id)
+        item["name"] = account.full_name or account.email
+        item["email"] = account.email
         item.pop("parent_phone", None)
         profiles.append(item)
     users = list(db.scalars(select(User))) if global_access else []
+    enrollments = list(
+        db.scalars(select(StudentEnrollment).where(StudentEnrollment.student_id.in_(ids)))
+    )
     return dict(
         user=dict(
             id=user.id, name=user.full_name, email=user.email, role=user.role.value
@@ -323,6 +331,7 @@ def workspace_data(
             )
         ],
         students=profiles,
+        enrollments=[record_dict(e) for e in enrollments],
         teaching=[
             record_dict(a)
             for a in db.scalars(
@@ -354,11 +363,27 @@ def save_student(
     user: User = Depends(get_current_user),
     db: Session = Depends(get_db),
 ):
-    require_role(user, "super_admin")
-    account = get_record(db, User, payload.user_id)
-    if account.role != UserRole.STUDENT:
-        raise HTTPException(400, "Select a Student account.")
+    require_role(user, "super_admin", "school_management")
     get_record(db, School, payload.school_id)
+    check_school(db, user, payload.school_id)
+    if payload.user_id is not None:
+        if user.role != UserRole.SUPER_ADMIN:
+            raise HTTPException(403, "School Management must create a new student account.")
+        account = get_record(db, User, payload.user_id)
+        if account.role != UserRole.STUDENT:
+            raise HTTPException(400, "Select a Student account.")
+    else:
+        email = str(payload.email).lower()
+        if db.scalar(select(User).where(User.email == email)):
+            raise HTTPException(409, "A user with this Google email already exists.")
+        account = User(
+            google_subject=f"pending:{uuid4().hex}",
+            email=email,
+            full_name=payload.full_name,
+            role=UserRole.STUDENT,
+        )
+        db.add(account)
+        db.flush()
     node = get_record(db, CurriculumNode, payload.class_node_id)
     if node.level != CurriculumLevel.CLASS:
         raise HTTPException(400, "Select a Class.")
@@ -367,9 +392,31 @@ def save_student(
             409,
             "Student already enrolled. Historical class transfers require a separate workflow.",
         )
-    student = StudentProfile(**payload.model_dump())
+    if db.scalar(
+        select(StudentProfile).where(
+            StudentProfile.school_id == payload.school_id,
+            StudentProfile.admission_number == payload.admission_number,
+        )
+    ):
+        raise HTTPException(409, "Admission number already exists in this school.")
+    student = StudentProfile(
+        user_id=account.id,
+        school_id=payload.school_id,
+        class_node_id=payload.class_node_id,
+        admission_number=payload.admission_number,
+        section=payload.section,
+        academic_year=payload.academic_year,
+    )
     db.add(student)
     db.flush()
+    db.add(
+        StudentEnrollment(
+            student_id=student.id,
+            academic_year=payload.academic_year,
+            class_node_id=payload.class_node_id,
+            section=payload.section,
+        )
+    )
     if not db.scalar(
         select(UserSchoolAssignment).where(
             UserSchoolAssignment.user_id == account.id,
@@ -377,9 +424,294 @@ def save_student(
         )
     ):
         db.add(UserSchoolAssignment(user_id=account.id, school_id=payload.school_id))
-    audit(db, user, "enrol", "student", student.id, payload.model_dump())
+    audit(
+        db,
+        user,
+        "enrol",
+        "student",
+        student.id,
+        {
+            "school_id": payload.school_id,
+            "class_node_id": payload.class_node_id,
+            "academic_year": payload.academic_year,
+            "section": payload.section,
+        },
+    )
     db.commit()
     return {"id": student.id}
+
+
+@router.put("/students/{id}")
+def update_student(
+    id: int,
+    payload: StudentUpdate,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_role(user, "super_admin", "school_management")
+    student = get_record(db, StudentProfile, id)
+    check_school(db, user, student.school_id)
+    account = get_record(db, User, student.user_id)
+    email = str(payload.email).lower()
+    conflict = db.scalar(select(User).where(User.email == email, User.id != account.id))
+    if conflict:
+        raise HTTPException(409, "A user with this Google email already exists.")
+    admission_conflict = db.scalar(
+        select(StudentProfile).where(
+            StudentProfile.school_id == student.school_id,
+            StudentProfile.admission_number == payload.admission_number,
+            StudentProfile.id != student.id,
+        )
+    )
+    if admission_conflict:
+        raise HTTPException(409, "Admission number already exists in this school.")
+    before = {
+        "email": account.email,
+        "full_name": account.full_name,
+        "admission_number": student.admission_number,
+        "section": student.section,
+        "academic_year": student.academic_year,
+    }
+    if account.email != email:
+        account.email = email
+        account.google_subject = f"pending:{uuid4().hex}"
+    account.full_name = payload.full_name
+    student.admission_number = payload.admission_number
+    student.section = payload.section
+    previous_year = student.academic_year
+    if previous_year and previous_year != payload.academic_year:
+        raise HTTPException(400, "Academic year changes require the year-close workflow.")
+    student.academic_year = payload.academic_year
+    active = db.scalar(
+        select(StudentEnrollment).where(
+            StudentEnrollment.student_id == student.id,
+            StudentEnrollment.academic_year == student.academic_year,
+        )
+    )
+    if active:
+        active.section = payload.section
+    elif not previous_year:
+        db.add(
+            StudentEnrollment(
+                student_id=student.id,
+                academic_year=payload.academic_year,
+                class_node_id=student.class_node_id,
+                section=payload.section,
+            )
+        )
+    audit(db, user, "update", "student", id, {"before": before, "after": payload.model_dump(mode="json")})
+    db.commit()
+    return {"ok": True}
+
+
+@router.patch("/students/{id}/retention")
+def set_student_retention(
+    id: int,
+    payload: RetentionInput,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_role(user, "super_admin", "school_management", "ist")
+    student = get_record(db, StudentProfile, id)
+    check_school(db, user, student.school_id)
+    if student.status != "active":
+        raise HTTPException(400, "Only active students can be retained.")
+    if user.role == UserRole.IST:
+        assigned_classes = {
+            subject_class(db, assignment.subject_id)
+            for assignment in db.scalars(
+                select(TeachingAssignment).where(
+                    TeachingAssignment.user_id == user.id,
+                    TeachingAssignment.school_id == student.school_id,
+                )
+            )
+        }
+        if student.class_node_id not in assigned_classes:
+            raise HTTPException(403, "The student is not in one of your assigned classes.")
+    student.retain_next_year = payload.retain
+    audit(db, user, "retention", "student", id, payload.model_dump())
+    db.commit()
+    return {"ok": True}
+
+
+@router.post("/schools/{school_id}/close-academic-year")
+def close_academic_year(
+    school_id: int,
+    payload: YearCloseInput,
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_role(user, "super_admin", "school_management")
+    get_record(db, School, school_id)
+    check_school(db, user, school_id)
+    students = list(
+        db.scalars(
+            select(StudentProfile).where(
+                StudentProfile.school_id == school_id,
+                StudentProfile.academic_year == payload.current_academic_year,
+                StudentProfile.status == "active",
+            )
+        )
+    )
+    if not students:
+        raise HTTPException(400, "No active students found for that academic year.")
+    promoted = retained = graduated = 0
+    for student in students:
+        current_class = get_record(db, CurriculumNode, student.class_node_id)
+        history = db.scalar(
+            select(StudentEnrollment).where(
+                StudentEnrollment.student_id == student.id,
+                StudentEnrollment.academic_year == payload.current_academic_year,
+            )
+        )
+        if student.retain_next_year:
+            next_class = current_class
+            outcome = "retained"
+            retained += 1
+        else:
+            ordered_classes = list(db.scalars(
+                select(CurriculumNode)
+                .where(
+                    CurriculumNode.board_id == current_class.board_id,
+                    CurriculumNode.level == CurriculumLevel.CLASS,
+                )
+                .order_by(CurriculumNode.sequence, CurriculumNode.id)
+            ))
+            current_index = next(
+                index for index, item in enumerate(ordered_classes) if item.id == current_class.id
+            )
+            next_class = next(
+                (
+                    item
+                    for item in ordered_classes[current_index + 1 :]
+                    if item.is_active
+                ),
+                None,
+            )
+            if next_class is None:
+                student.status = "graduated"
+                if history:
+                    history.outcome = "graduated"
+                graduated += 1
+                continue
+            outcome = "promoted"
+            promoted += 1
+        if history:
+            history.outcome = outcome
+        student.class_node_id = next_class.id
+        student.academic_year = payload.next_academic_year
+        student.retain_next_year = False
+        db.add(
+            StudentEnrollment(
+                student_id=student.id,
+                academic_year=payload.next_academic_year,
+                class_node_id=next_class.id,
+                section=student.section or "Unassigned",
+            )
+        )
+    summary = {"promoted": promoted, "retained": retained, "graduated": graduated}
+    audit(db, user, "close_academic_year", "school", school_id, {**payload.model_dump(), **summary})
+    db.commit()
+    return summary
+
+
+@router.post("/students/bulk")
+async def bulk_students(
+    school_id: int = Form(...),
+    commit: bool = Form(False),
+    file: UploadFile = File(...),
+    user: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+):
+    require_role(user, "super_admin", "school_management")
+    get_record(db, School, school_id)
+    check_school(db, user, school_id)
+    raw = await file.read()
+    if len(raw) > 2_000_000:
+        raise HTTPException(413, "Student CSV must be 2 MB or smaller.")
+    try:
+        rows = list(csv.DictReader(io.StringIO(raw.decode("utf-8-sig"))))
+    except UnicodeDecodeError as exc:
+        raise HTTPException(400, "Upload a UTF-8 CSV file.") from exc
+    required = {"admission_number", "full_name", "email", "board", "class", "section", "academic_year"}
+    if not rows or not required.issubset(rows[0]):
+        raise HTTPException(400, "CSV columns: admission_number, full_name, email, board, class, section, academic_year")
+    if len(rows) > 2000:
+        raise HTTPException(400, "A bulk file can contain at most 2,000 students.")
+    validated = []
+    seen_emails: set[str] = set()
+    seen_admissions: set[str] = set()
+    errors = []
+    for number, row in enumerate(rows, 2):
+        email = row["email"].strip().lower()
+        admission = row["admission_number"].strip()
+        board = db.scalar(select(CurriculumBoard).where(CurriculumBoard.name == row["board"].strip()))
+        class_node = db.scalar(
+            select(CurriculumNode).where(
+                CurriculumNode.board_id == (board.id if board else -1),
+                CurriculumNode.level == CurriculumLevel.CLASS,
+                CurriculumNode.name == row["class"].strip(),
+            )
+        )
+        reason = None
+        if not all(row.get(key, "").strip() for key in required):
+            reason = "All columns are required."
+        elif not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+            reason = "Invalid email."
+        elif not re.fullmatch(r"(\d{4})-(\d{4})", row["academic_year"].strip()):
+            reason = "Academic year must be YYYY-YYYY."
+        elif int(row["academic_year"].strip()[5:]) != int(row["academic_year"].strip()[:4]) + 1:
+            reason = "Academic year must contain consecutive years."
+        elif not class_node:
+            reason = "Board or class was not found."
+        elif email in seen_emails or admission in seen_admissions:
+            reason = "Duplicate email or admission number in file."
+        elif db.scalar(select(User).where(User.email == email)):
+            reason = "Email already exists."
+        elif db.scalar(select(StudentProfile).where(StudentProfile.school_id == school_id, StudentProfile.admission_number == admission)):
+            reason = "Admission number already exists in this school."
+        if reason:
+            errors.append({"row": number, "error": reason})
+        else:
+            seen_emails.add(email)
+            seen_admissions.add(admission)
+            validated.append({**row, "email": email, "admission_number": admission, "class_node_id": class_node.id})
+    preview = {"total": len(rows), "valid": len(validated), "errors": errors}
+    if not commit:
+        return preview
+    if errors:
+        raise HTTPException(400, {"message": "Correct all rows before importing.", **preview})
+    for row in validated:
+        account = User(
+            google_subject=f"pending:{uuid4().hex}",
+            email=row["email"],
+            full_name=row["full_name"].strip(),
+            role=UserRole.STUDENT,
+        )
+        db.add(account)
+        db.flush()
+        student = StudentProfile(
+            user_id=account.id,
+            school_id=school_id,
+            class_node_id=row["class_node_id"],
+            admission_number=row["admission_number"],
+            section=row["section"].strip(),
+            academic_year=row["academic_year"].strip(),
+        )
+        db.add(student)
+        db.flush()
+        db.add_all([
+            UserSchoolAssignment(user_id=account.id, school_id=school_id),
+            StudentEnrollment(
+                student_id=student.id,
+                academic_year=student.academic_year,
+                class_node_id=student.class_node_id,
+                section=student.section,
+            ),
+        ])
+    audit(db, user, "bulk_enrol", "school", school_id, {"count": len(validated)})
+    db.commit()
+    return {**preview, "imported": len(validated)}
 
 
 @router.post("/teaching")

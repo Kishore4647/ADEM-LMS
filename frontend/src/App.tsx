@@ -37,6 +37,7 @@ const navigation: Record<string, string[]> = {
   ],
   ist: [
     "Overview",
+    "Enrolment",
     "Resources",
     "Sessions",
     "Marks",
@@ -46,6 +47,7 @@ const navigation: Record<string, string[]> = {
   ],
   school_management: [
     "Overview",
+    "Enrolment",
     "Analytics",
     "Sessions",
     "Marks",

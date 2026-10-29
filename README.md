@@ -32,6 +32,8 @@ Only the configured `BOOTSTRAP_ADMIN_EMAIL` can create the initial Super Admin o
 ## Connected workflows
 
 * Super Admin: schools, user provisioning and activation, school access, student enrolment, IST teaching assignments, curriculum, resources, session review, marks and corrections, attendance, assessments, quarterly publication, imports, analytics, community settings, audit history.
+* School Management: creates and edits students only in assigned schools, previews/imports student CSVs, and closes the academic year after retention decisions. Admission numbers are unique per school and each active student has one class, section and academic year.
+* IST: can flag students in an assigned class for retention. On year closure, retained students move to the new academic year in the same class, other students move to the next ordered class, and final-class students become Graduated. Every placement is retained in enrolment history.
 * Content Uploader: curriculum, private file upload, Drive video mapping, supplementary resources, structured DOCX import, rich question editing, scoring policy configuration, dispatch to enrolled students, results and school analytics, CSV/XLSX marks import.
 * IST: assigned subjects and class rosters, resource access and supplementary uploads, media-readiness confirmation, missing-content reports, daily sessions and coverage, submission and rejection correction (notes, date and covered sub-topics), marks and attendance, online result visibility and quarterly calculations.
 * School Management: school-scoped sessions, mark records, attendance, MCQ results, curriculum coverage, analytics, and published progress cards.
@@ -102,9 +104,17 @@ cd backend
 .\.venv\Scripts\python.exe -m alembic upgrade head
 ```
 
+On Render, run the migration before each single-instance API start:
+
+```text
+python -m alembic upgrade head && python -m uvicorn app.main:app --host 0.0.0.0 --port $PORT
+```
+
 Future model changes require explicit migration revisions; `create_all` is not an alteration migration. Baseline downgrade is intentionally disabled to preserve academic data.
 
-Session cookies are HttpOnly, SameSite=Lax, eight-hour signed sessions. Production sets Secure cookies and requires a dedicated `SESSION_SECRET`. The session contains only the user ID; role and active status are rechecked in the database. Origin validation protects all modifying endpoints. The Google client secret stays on the backend. A supplied `.env` session secret is preferred even in development; local fallback derives a signing key from the existing OAuth secret.
+Student bulk CSV headers are `admission_number,full_name,email,board,class,section,academic_year`. Board and class names must exactly match the curriculum. Both Super Admin and School Management must preview a file with no errors before importing it.
+
+Session cookies are HttpOnly eight-hour signed sessions. Local development uses SameSite=Lax; the separate Vercel/Render production deployment uses SameSite=None with Secure cookies and requires a dedicated `SESSION_SECRET`. The session contains only the user ID; role and active status are rechecked in the database. Origin validation protects all modifying endpoints. The Google client secret stays on the backend. A supplied `.env` session secret is preferred even in development; local fallback derives a signing key from the existing OAuth secret.
 
 ## Tests
 

@@ -3,7 +3,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, select
 from sqlalchemy.orm import Session
 from sqlalchemy.pool import StaticPool
 
@@ -15,6 +15,7 @@ from app.models import (
     CurriculumLevel,
     CurriculumNode,
     School,
+    StudentEnrollment,
     StudentProfile,
     User,
     UserRole,
@@ -160,6 +161,87 @@ def test_cross_school_and_role_boundaries(env):
         client.post("/api/workspace/marks", json=mark_payload(ids)).status_code == 403
     )
     assert client.get("/api/workspace/question-sets/999").status_code == 403
+
+
+def test_school_managed_student_retention_and_promotion(env):
+    client, actor, ids, engine = env
+    with Session(engine) as db:
+        first_class = db.get(CurriculumNode, ids["nodes"][0])
+        first_class.sequence = 1
+        next_class = CurriculumNode(
+            name="class 2",
+            level=CurriculumLevel.CLASS,
+            board_id=first_class.board_id,
+            sequence=2,
+        )
+        db.add(next_class)
+        db.commit()
+        next_class_id = next_class.id
+
+    actor["id"] = ids["accounts"]["school_management"]
+    created_ids = []
+    for number in ("A-001", "A-002"):
+        response = client.post(
+            "/api/workspace/students",
+            json={
+                "school_id": ids["school"],
+                "class_node_id": ids["nodes"][0],
+                "admission_number": number,
+                "section": "A",
+                "academic_year": "2026-2027",
+                "full_name": f"Student {number}",
+                "email": f"{number.lower()}@example.com",
+            },
+        )
+        assert response.status_code == 200, response.text
+        created_ids.append(response.json()["id"])
+
+    denied = client.post(
+        "/api/workspace/students",
+        json={
+            "school_id": ids["other_school"],
+            "class_node_id": ids["nodes"][0],
+            "admission_number": "B-001",
+            "section": "A",
+            "academic_year": "2026-2027",
+            "full_name": "Wrong school",
+            "email": "wrong-school@example.com",
+        },
+    )
+    assert denied.status_code == 403
+
+    actor["id"] = ids["accounts"]["ist"]
+    retained = client.patch(
+        f"/api/workspace/students/{created_ids[0]}/retention", json={"retain": True}
+    )
+    assert retained.status_code == 200, retained.text
+
+    actor["id"] = ids["accounts"]["school_management"]
+    closed = client.post(
+        f"/api/workspace/schools/{ids['school']}/close-academic-year",
+        json={
+            "current_academic_year": "2026-2027",
+            "next_academic_year": "2027-2028",
+        },
+    )
+    assert closed.status_code == 200, closed.text
+    assert closed.json() == {"promoted": 1, "retained": 1, "graduated": 0}
+
+    with Session(engine) as db:
+        retained_student = db.get(StudentProfile, created_ids[0])
+        promoted_student = db.get(StudentProfile, created_ids[1])
+        assert retained_student.class_node_id == ids["nodes"][0]
+        assert promoted_student.class_node_id == next_class_id
+        assert retained_student.academic_year == "2027-2028"
+        assert len(
+            list(
+                db.scalars(
+                    select(StudentEnrollment).where(
+                        StudentEnrollment.student_id == retained_student.id
+                    )
+                )
+            )
+        ) == 2
 
 
 def test_marks_attendance_review_and_progress(env):

@@ -401,24 +401,46 @@ export function Curriculum({ data, refresh }: PageProps) {
   );
 }
 
-export function Enrolment({ data, refresh }: PageProps) {
+export function Enrolment({ data, user, refresh }: PageProps) {
+  const canManage = ["super_admin", "school_management"].includes(user.role);
+  const [editing, setEditing] = useState<number | null>(null);
+  const [bulkFile, setBulkFile] = useState<File | null>(null);
+  const [bulkSchool, setBulkSchool] = useState(0);
+  const [bulkPreview, setBulkPreview] = useState<{
+    total: number;
+    valid: number;
+    errors: { row: number; error: string }[];
+  } | null>(null);
+  const [bulkMessage, setBulkMessage] = useState("");
+
+  async function sendBulk(commit: boolean) {
+    if (!bulkFile || !bulkSchool) {
+      setBulkMessage("Select a school and CSV file.");
+      return;
+    }
+    const form = new FormData();
+    form.set("school_id", String(bulkSchool));
+    form.set("commit", String(commit));
+    form.set("file", bulkFile);
+    try {
+      const result = await request<typeof bulkPreview>("workspace/students/bulk", form);
+      setBulkPreview(result);
+      setBulkMessage(commit ? `Imported ${result?.valid ?? 0} students.` : "Preview complete.");
+      if (commit) await refresh();
+    } catch (error) {
+      setBulkMessage((error as Error).message);
+    }
+  }
+
   return (
     <>
-      <div className="two-column">
-        <Panel title="Enrol student">
+      {canManage && (
+        <div className="two-column">
+          <Panel title="Add student">
           <Form
             fields={[
-              {
-                key: "user_id",
-                label: "Student account",
-                options: data.users
-                  .filter(
-                    (u) =>
-                      u.role === "student" &&
-                      !data.students.some((s) => s.user_id === u.id),
-                  )
-                  .map((u) => ({ id: u.id, name: u.full_name || u.email })),
-              },
+              { key: "full_name", label: "Student name" },
+              { key: "email", label: "Google email", type: "email" },
               { key: "school_id", label: "School", options: data.schools },
               {
                 key: "class_node_id",
@@ -430,16 +452,13 @@ export function Enrolment({ data, refresh }: PageProps) {
                     name: `${data.boards.find((b) => b.id === n.board_id)?.name} / ${n.name}`,
                   })),
               },
-              {
-                key: "admission_number",
-                label: "Admission number",
-                required: false,
-              },
+              { key: "section", label: "Section (for example, A)" },
+              { key: "academic_year", label: "Academic year", value: "2026-2027" },
+              { key: "admission_number", label: "Admission number" },
             ]}
             submit={async (v) => {
               await request("workspace/students", {
                 ...v,
-                user_id: +v.user_id,
                 school_id: +v.school_id,
                 class_node_id: +v.class_node_id,
               });
@@ -448,6 +467,42 @@ export function Enrolment({ data, refresh }: PageProps) {
             label="Enrol student"
           />
         </Panel>
+          <Panel title="Bulk student import">
+            <p className="muted">
+              CSV columns: admission_number, full_name, email, board, class,
+              section, academic_year. Preview must have no errors before import.
+            </p>
+            <label className="file-input">
+              School
+              <select value={bulkSchool} onChange={(e) => setBulkSchool(+e.target.value)}>
+                <option value={0}>Select…</option>
+                {data.schools.map((school) => (
+                  <option key={school.id} value={school.id}>{school.name}</option>
+                ))}
+              </select>
+            </label>
+            <label className="file-input">
+              Student CSV
+              <input type="file" accept=".csv,text/csv" onChange={(e) => {
+                setBulkFile(e.target.files?.[0] ?? null);
+                setBulkPreview(null);
+              }} />
+            </label>
+            <div className="button-row">
+              <button className="secondary" onClick={() => void sendBulk(false)}>Preview</button>
+              <button className="primary" disabled={!bulkPreview || bulkPreview.errors.length > 0} onClick={() => void sendBulk(true)}>Import valid preview</button>
+            </div>
+            {bulkMessage && <p className="muted">{bulkMessage}</p>}
+            {bulkPreview && (
+              <p className={bulkPreview.errors.length ? "error" : "success"}>
+                {bulkPreview.valid} of {bulkPreview.total} valid.
+                {bulkPreview.errors.slice(0, 5).map((e) => ` Row ${e.row}: ${e.error}`).join(" ")}
+              </p>
+            )}
+          </Panel>
+        </div>
+      )}
+      {user.role === "super_admin" && (
         <Panel title="Assign IST subject">
           <Form
             fields={[
@@ -478,19 +533,81 @@ export function Enrolment({ data, refresh }: PageProps) {
             label="Assign trainer"
           />
         </Panel>
-      </div>
+      )}
+      {canManage && (
+        <Panel title="Close academic year">
+          <p className="muted">
+            This promotes active students, keeps retained students in the same
+            class, and graduates students in the final class. This cannot be
+            repeated for the same year.
+          </p>
+          <Form
+            fields={[
+              { key: "school_id", label: "School", options: data.schools },
+              { key: "current_academic_year", label: "Closing year", value: "2026-2027" },
+              { key: "next_academic_year", label: "Next year", value: "2027-2028" },
+            ]}
+            submit={async (v) => {
+              if (!window.confirm(
+                `Close ${v.current_academic_year} and update every active student in this school?`,
+              )) throw new Error("Academic-year closure cancelled.");
+              await request(`workspace/schools/${+v.school_id}/close-academic-year`, {
+                current_academic_year: v.current_academic_year,
+                next_academic_year: v.next_academic_year,
+              });
+              await refresh();
+            }}
+            label="Close year and promote students"
+          />
+        </Panel>
+      )}
       <Panel title="Student enrolments">
         <Table
-          headers={["Student", "School", "Class", "Admission"]}
+          headers={["Student", "School", "Class / section", "Academic year", "Admission", "Status", "Actions"]}
           rows={data.students.map((s) => [
-            s.name,
+            <div key={s.id}><strong>{s.name}</strong><br /><span className="muted">{s.email}</span></div>,
             data.schools.find((x) => x.id === s.school_id)?.name,
-            nodePath(data.nodes, s.class_node_id),
+            `${nodePath(data.nodes, s.class_node_id)} / ${s.section || "—"}`,
+            s.academic_year || "Not assigned",
             s.admission_number,
+            <Badge key={`status-${s.id}`} value={s.status} />,
+            <div className="button-row" key={`actions-${s.id}`}>
+              {s.status === "active" && (
+                <button className="secondary" onClick={async () => {
+                  await request(`workspace/students/${s.id}/retention`, { retain: !s.retain_next_year }, "PATCH");
+                  await refresh();
+                }}>{s.retain_next_year ? "Cancel retention" : "Retain next year"}</button>
+              )}
+              {canManage && <button className="secondary" onClick={() => setEditing(s.id)}>Edit</button>}
+            </div>,
           ])}
         />
       </Panel>
-      <Panel title="Teaching assignments">
+      {editing && (() => {
+        const student = data.students.find((s) => s.id === editing)!;
+        return (
+          <Panel title={`Edit ${student.name}`}>
+            <Form
+              initial={{ full_name: student.name, email: student.email, admission_number: student.admission_number, section: student.section, academic_year: student.academic_year || "2026-2027" }}
+              resetOnSave={false}
+              fields={[
+                { key: "full_name", label: "Student name" },
+                { key: "email", label: "Google email", type: "email" },
+                { key: "admission_number", label: "Admission number" },
+                { key: "section", label: "Section" },
+                { key: "academic_year", label: "Academic year" },
+              ]}
+              submit={async (v) => {
+                await request(`workspace/students/${editing}`, v, "PUT");
+                setEditing(null);
+                await refresh();
+              }}
+              label="Update student"
+            />
+          </Panel>
+        );
+      })()}
+      {user.role === "super_admin" && <Panel title="Teaching assignments">
         <Table
           headers={["Trainer", "School", "Subject"]}
           rows={data.teaching.map((a) => [
@@ -499,7 +616,7 @@ export function Enrolment({ data, refresh }: PageProps) {
             nodePath(data.nodes, a.subject_id),
           ])}
         />
-      </Panel>
+      </Panel>}
     </>
   );
 }
