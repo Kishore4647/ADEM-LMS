@@ -1,0 +1,29 @@
+.public-hall {
+  max-width: 1100px;
+  margin: 4rem auto;
+  padding: 1.5rem;
+}
+.public-hall > h2 {
+  text-align: center;
+  color: #45665e;
+}
+.public-hall > div {
+  display: flex;
+  gap: 1rem;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+.public-hall article {
+  background: white;
+  border: 1px solid #e2eae6;
+  border-radius: 10px;
+  padding: 1.3rem 2rem;
+  text-align: center;
+}
+.public-hall article > span {
+  color: #b39b59;
+}
+.public-hall p {
+  font-size: 0.75rem;
+  color: #87958f;
+}

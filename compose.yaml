@@ -1,0 +1,31 @@
+services:
+  migrate:
+    build: ./backend
+    env_file: .env
+    command: ["python", "-m", "alembic", "upgrade", "head"]
+  backend:
+    build: ./backend
+    env_file: .env
+    environment:
+      UPLOADS_DIR: /data/uploads
+    volumes:
+      - lms_files:/data/uploads
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/ready')"]
+      interval: 15s
+      timeout: 12s
+      retries: 5
+    restart: unless-stopped
+  frontend:
+    build: ./frontend
+    ports:
+      - '8080:80'
+    depends_on:
+      backend:
+        condition: service_healthy
+    restart: unless-stopped
+volumes:
+  lms_files:
